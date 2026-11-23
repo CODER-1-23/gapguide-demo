@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>GAPGUIDE 1.1 - Relative Depth</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<style>
+:root{color-scheme:dark;--bg:#0a1220;--panel:#142138;--line:#2b3c57;--muted:#adbbcf;--green:#37d6a0;--amber:#ffc65c;--red:#ff6d7b}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(160deg,#101d32,#080d17);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#f4f7fb}
+main{max-width:900px;margin:auto;padding:16px 13px 32px}header{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px}
+h1{font-size:26px;letter-spacing:1.4px;margin:0}.sub,.muted{color:var(--muted);font-size:12px;line-height:1.5}
+.pill{border:1px solid #2e795f;color:#8af0c4;border-radius:99px;padding:6px 10px;font-size:10px;font-weight:800}
+.panel{background:rgba(20,33,56,.96);border:1px solid var(--line);border-radius:16px;padding:13px;margin:11px 0}
+.videoWrap{position:relative;overflow:hidden;border-radius:12px;background:#05080e;aspect-ratio:4/3}
+video,canvas#overlay{position:absolute;width:100%;height:100%;inset:0;object-fit:cover}canvas#overlay{pointer-events:none}
+.controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:11px}
+button{border:0;border-radius:10px;padding:12px 14px;font-weight:750;background:var(--green);color:#062016}
+button.secondary{background:#2a3b56;color:#f4f7fb}button:disabled{opacity:.45}
+.status{color:var(--muted);font-size:12px;margin-top:9px;min-height:19px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+.zone{background:#0a1424;border:1px solid var(--line);border-radius:11px;padding:10px 6px;text-align:center}
+.zone b{font-size:12px}.zone .score{font-size:21px;font-weight:850;margin:5px 0}
+.zone small{display:block;color:var(--muted);font-size:11px}.zone.near{border-color:var(--red)}.zone.medium{border-color:var(--amber)}.zone.far{border-color:var(--green)}
+.depthLegend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;font-size:11px;color:var(--muted)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px}
+.big{font-size:18px;font-weight:850;margin:5px 0}
+.warning{border-color:#815a24;background:#261f13}.warning strong{color:#ffd28e}
+@media(max-width:460px){h1{font-size:23px}.panel{padding:10px}}
+</style>
+</head>
+<body>
+<main>
+<header><div><h1>GAPGUIDE 1.1</h1><div class="sub">Object detection + scene-relative depth categories</div></div><span class="pill">ANDROID WEB DEMO</span></header>
+<section class="panel">
+ <div class="videoWrap"><video id="video" autoplay muted playsinline></video><canvas id="overlay"></canvas></div>
+ <div class="controls">
+  <button id="start">Start camera + AI</button><button id="stop" class="secondary" disabled>Stop</button><button id="vtest" class="secondary">Test vibration</button>
+ </div>
+ <div class="status" id="status">Ready. Internet is needed for the first model download.</div>
+</section>
+<section class="panel">
+ <b>Object + relative depth results</b>
+ <div class="grid">
+  <div class="zone" id="left"><b>LEFT</b><div class="score" id="leftDepth">—</div><small id="leftInfo">Waiting</small></div>
+  <div class="zone" id="center"><b>CENTRE</b><div class="score" id="centerDepth">—</div><small id="centerInfo">Waiting</small></div>
+  <div class="zone" id="right"><b>RIGHT</b><div class="score" id="rightDepth">—</div><small id="rightInfo">Waiting</small></div>
+ </div>
+ <div class="depthLegend">
+  <span><i class="dot" style="background:var(--red)"></i>Nearer relative depth</span>
+  <span><i class="dot" style="background:var(--amber)"></i>Middle relative depth</span>
+  <span><i class="dot" style="background:var(--green)"></i>Farther relative depth</span>
+ </div>
+ <div class="big" id="summary">Waiting for camera</div>
+ <div class="muted" id="details">Depth categories are relative to the current camera scene, not metres.</div>
+</section>
+<section class="panel">
+ <b>Detected objects</b><div id="objects" class="muted" style="margin-top:7px">None yet.</div>
+</section>
+<section class="panel warning">
+ <strong>Important safety limitation</strong>
+ <div class="muted" style="color:#f1dcb9;margin-top:5px">This is an experimental student demonstration, not a mobility aid. Depth Anything V2 Small estimates relative depth from one image; it does not provide calibrated distance in metres. Near/medium/far labels are approximate scene-relative categories and can be wrong. The camera may miss stairs, holes, kerbs, glass, drop-offs, traffic and other hazards. Never use this prototype to guide real-world walking or replace a white cane, guide dog or mobility training.</div>
+</section>
+<div class="muted" style="text-align:center">Keep the phone stationary during tests. The depth model runs periodically to reduce processing load.</div>
+</main>
+<script type="module">
+import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1';
+const video=document.getElementById('video'), canvas=document.getElementById('overlay'), ctx=canvas.getContext('2d');
+const statusEl=document.getElementById('status'), summary=document.getElementById('summary'), details=document.getElementById('details');
+const objectsEl=document.getElementById('objects');
+const startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop');
+let stream=null, detector=null, depthPipe=null, running=false, busy=false, depthBusy=false;
+let lastDepth=null, lastDepthAt=0, lastFeedback=0, lastSpeech=0, lastZone='';
+const depthCanvas=document.createElement('canvas'), depthCtx=depthCanvas.getContext('2d',{willReadFrequently:true});
+const DEPTH_INTERVAL=2600;
+const DEPTH_IS_HIGHER_NEARER=true; // If near/far appears reversed in your tests, change this to false.
+function status(t){statusEl.textContent=t}
+function speak(t){if(!('speechSynthesis'in window))return; speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(t);u.rate=1;speechSynthesis.speak(u)}
+function buzz(z){if(!navigator.vibrate)return;const p={left:[90,70,90],center:[260],right:[90,70,90,70,90]};navigator.vibrate(p[z]||[100])}
+function draw(preds){
+ const w=video.videoWidth,h=video.videoHeight;if(!w||!h)return;
+ canvas.width=w;canvas.height=h;ctx.clearRect(0,0,w,h);ctx.lineWidth=Math.max(2,w/320);ctx.font=`${Math.max(14,w/36)}px system-ui`;
+ preds.forEach(p=>{const [x,y,bw,bh]=p.bbox;ctx.strokeStyle='#39e6a4';ctx.strokeRect(x,y,bw,bh);const label=p.class+' '+Math.round(p.score*100)+'%';const tw=ctx.measureText(label).width;ctx.fillStyle='#39e6a4';ctx.fillRect(x,Math.max(0,y-23),tw+9,22);ctx.fillStyle='#062016';ctx.fillText(label,x+4,Math.max(16,y-7));});
+}
+function sampleDepthForBox(box){
+ if(!lastDepth)return null;
+ const [x,y,bw,bh]=box, dw=lastDepth.width, dh=lastDepth.height, vw=video.videoWidth, vh=video.videoHeight;
+ // Sample the central portion of each detected object's box.
+ const x1=Math.max(0,Math.floor((x+bw*.25)/vw*dw)), x2=Math.min(dw-1,Math.ceil((x+bw*.75)/vw*dw));
+ const y1=Math.max(0,Math.floor((y+bh*.25)/vh*dh)), y2=Math.min(dh-1,Math.ceil((y+bh*.75)/vh*dh));
+ const vals=[];
+ for(let yy=y1;yy<=y2;yy+=Math.max(1,Math.floor((y2-y1)/8))){
+  for(let xx=x1;xx<=x2;xx+=Math.max(1,Math.floor((x2-x1)/8))){
+   const v=lastDepth.data[yy*dw+xx];if(Number.isFinite(v))vals.push(v);
+  }
+ }
+ if(!vals.length)return null;
+ vals.sort((a,b)=>a-b);return vals[Math.floor(vals.length/2)];
+}
+function percentile(value,arr){
+ const sorted=arr.slice().sort((a,b)=>a-b);let n=sorted.findIndex(v=>v>=value);if(n<0)n=sorted.length-1;return sorted.length<=1 ? 0.5 : n/(sorted.length-1);
+}
+function classify(pct){
+ const nearPct=DEPTH_IS_HIGHER_NEARER ? pct : 1-pct;
+ if(nearPct>=.67)return 'NEAR';if(nearPct>=.34)return 'MEDIUM';return 'FAR';
+}
+function updateResults(preds){
+ const zones=[[],[],[]];
+ preds.forEach(p=>{const c=(p.bbox[0]+p.bbox[2]/2)/video.videoWidth;const z=Math.max(0,Math.min(2,Math.floor(c*3)));const d=sampleDepthForBox(p.bbox);zones[z].push({name:p.class,score:p.score,depth:d});});
+ const all=[];
+ if(lastDepth){
+  const step=Math.max(1,Math.floor(lastDepth.data.length/5000));
+  for(let k=0;k<lastDepth.data.length;k+=step){
+   const v=lastDepth.data[k];
+   if(Number.isFinite(v)) all.push(v);
+  }
+ }
+ const zoneNames=['left','center','right'];
+ let zoneSummary=[];
+ zones.forEach((items,i)=>{
+  const el=document.getElementById(zoneNames[i]), depthEl=document.getElementById(zoneNames[i]+'Depth'), info=document.getElementById(zoneNames[i]+'Info');
+  el.classList.remove('near','medium','far');
+  if(!items.length){depthEl.textContent='—';info.textContent='No detected object';zoneSummary.push({count:0,near:0});return;}
+  const vals=items.filter(o=>o.depth!==null).map(o=>o.depth);
+  if(!vals.length){depthEl.textContent='Unknown';info.textContent=items.length+' object(s)';zoneSummary.push({count:items.length,near:0});return;}
+  const med=vals.sort((a,b)=>a-b)[Math.floor(vals.length/2)], pct=percentile(med,all), cat=classify(pct);
+  depthEl.textContent=cat;info.textContent=items.length+' detected object(s)';
+  el.classList.add(cat.toLowerCase());
+  zoneSummary.push({count:items.length,near:cat==='NEAR'?1:0});
+ });
+ objectsEl.textContent=preds.length?preds.map(p=>{const d=sampleDepthForBox(p.bbox);let cat='depth unavailable';if(d!==null&&all.length)cat=classify(percentile(d,all)).toLowerCase()+' (relative)';return `${p.class} · ${Math.round(p.score*100)}% · ${cat}`}).join(' | '):'No familiar objects detected.';
+ if(!preds.length){summary.textContent='No familiar objects detected';details.textContent='No detections does not mean the path is clear.';return;}
+ if(!lastDepth){summary.textContent='Objects detected · depth model warming up';details.textContent='Waiting for the first depth estimate.';return;}
+ // Do not recommend a route. Report only the zone with the fewest detected objects.
+ const min=Math.min(...zoneSummary.map(z=>z.count)), candidates=zoneSummary.map((z,i)=>z.count===min?i:-1).filter(i=>i>=0);
+ if(candidates.length!==1){summary.textContent='No distinct least-occupied zone';details.textContent='The detected-object counts are tied. No directional cue issued.';return;}
+ const z=zoneNames[candidates[0]], now=Date.now();
+ summary.textContent='Fewest detected objects: '+z.toUpperCase();
+ details.textContent='Depth labels describe relative scene depth only. This is not a safe-route recommendation.';
+ if(now-lastFeedback>4000&&z!==lastZone){buzz(z);lastFeedback=now;lastZone=z;if(now-lastSpeech>7000){speak('Fewer detected objects on the '+z+'. Depth estimate is relative.');lastSpeech=now;}}
+}
+async function runDepth(){
+ if(!depthPipe||depthBusy||!running||video.readyState<2)return;
+ depthBusy=true;
+ try{
+  depthCanvas.width=384;depthCanvas.height=Math.round(384*video.videoHeight/video.videoWidth);
+  depthCtx.drawImage(video,0,0,depthCanvas.width,depthCanvas.height);
+  const out=await depthPipe(depthCanvas);
+  const t=out.predicted_depth;
+  const dims=t.dims;const h=dims[dims.length-2],w=dims[dims.length-1];
+  lastDepth={data:t.data,width:w,height:h};lastDepthAt=Date.now();
+ }catch(e){console.error(e);status('Depth model issue: '+e.message);}
+ depthBusy=false;
+}
+async function loop(){
+ if(!running||busy)return;busy=true;
+ try{
+  if(video.readyState>=2){
+   const preds=await detector.detect(video,12,.5);draw(preds);
+   if(Date.now()-lastDepthAt>DEPTH_INTERVAL) await runDepth();
+   updateResults(preds);
+  }
+ }catch(e){console.error(e);status('Processing error: '+e.message);}
+ busy=false;if(running)setTimeout(loop,650);
+}
+async function start(){
+ startBtn.disabled=true;
+ try{
+  status('Loading object detector…');
+  if(!detector){await tf.ready();detector=await cocoSsd.load({base:'lite_mobilenet_v2'});}
+  status('Loading depth model (first download may take a few minutes)…');
+  if(!depthPipe){
+   const options={dtype:'q4'};
+   if(navigator.gpu)options.device='webgpu';
+   depthPipe=await pipeline('depth-estimation','onnx-community/depth-anything-v2-small',options);
+  }
+  status('Opening rear camera…');
+  stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:640},height:{ideal:480}}});
+  video.srcObject=stream;await video.play();running=true;stopBtn.disabled=false;
+  status('Running. Depth is estimated periodically; keep the phone steady for testing.');
+  loop();
+ }catch(e){console.error(e);startBtn.disabled=false;status('Could not start: '+e.message+'. Check HTTPS, camera permission and internet.');}
+}
+function stop(){
+ running=false;if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}video.srcObject=null;
+ ctx.clearRect(0,0,canvas.width,canvas.height);startBtn.disabled=false;stopBtn.disabled=true;status('Stopped.');summary.textContent='Camera stopped';
+}
+startBtn.addEventListener('click',start);stopBtn.addEventListener('click',stop);
+document.getElementById('vtest').addEventListener('click',()=>{buzz('left');setTimeout(()=>buzz('center'),450);setTimeout(()=>buzz('right'),900);speak('Vibration test. Left. Centre. Right.');});
+window.addEventListener('beforeunload',stop);
+</script>
+</body>
+</html>
